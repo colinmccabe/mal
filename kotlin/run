@@ -1,0 +1,7 @@
+#!/bin/bash
+
+DIR="$(dirname $0)"
+CP="${DIR}/${STEP}.jar"
+CLASS="${STEP^}Kt"
+
+exec java -cp "$CP" "$CLASS" "$@"
