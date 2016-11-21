@@ -1,7 +1,9 @@
 import org.codehaus.jparsec.Parser
 import org.codehaus.jparsec.Parsers
 import org.codehaus.jparsec.Scanners
+import org.codehaus.jparsec.error.ParserException
 import org.codehaus.jparsec.pattern.Patterns
+import java.util.*
 
 sealed class Expr {
     object Nil : Expr()
@@ -15,9 +17,32 @@ sealed class Expr {
     data class SpliceUnquote(val expr: Expr) : Expr()
     data class Deref(val expr: Expr) : Expr()
     data class Metadata(val expr1: Expr, val expr2: Expr) : Expr()
-    data class SExpr(val exprs: List<Expr>) : Expr()
-    data class Vec(val exprs: List<Expr>) : Expr()
-    data class HashMap(val exprs: List<Expr>) : Expr()
+    data class List(val exprs: kotlin.collections.List<Expr>) : Expr()
+    data class Vec(val exprs: kotlin.collections.List<Expr>) : Expr()
+    data class HashMap(val exprs: kotlin.collections.List<Expr>) : Expr()
+}
+
+class Env {
+    private val scopes: Stack<MutableMap<String, Expr>> = {
+        val stack = Stack<MutableMap<String, Expr>>()
+        stack.push(mutableMapOf())
+        stack
+    }()
+
+    fun get(sym: String): Expr? =
+            scopes.reversed().fold(null as Expr?, { expr, scope -> expr ?: scope[sym] })
+
+    fun set(sym: String, value: Expr) {
+        scopes.peek()[sym] = value
+    }
+
+    fun pushScope() {
+        scopes.push(mutableMapOf())
+    }
+
+    fun popScope() {
+        scopes.pop()
+    }
 }
 
 val parser: Parser<Expr> = {
@@ -41,7 +66,7 @@ val parser: Parser<Expr> = {
             Parsers.between(
                     Scanners.isChar('(').next(whitespace.many()),
                     exprSeqRef.lazy(),
-                    whitespace.many().next(Scanners.isChar(')'))).map { Expr.SExpr(it) },
+                    whitespace.many().next(Scanners.isChar(')'))).map { Expr.List(it) },
             Parsers.between(
                     Scanners.isChar('[').next(whitespace.many()),
                     exprSeqRef.lazy(),
@@ -78,7 +103,7 @@ fun show(expr: Expr): String =
             is Expr.SpliceUnquote -> "(splice-unquote ${show(expr.expr)})"
             is Expr.Deref -> "(deref ${show(expr.expr)})"
             is Expr.Metadata -> "(with-meta ${show(expr.expr1)} ${show(expr.expr2)})"
-            is Expr.SExpr -> expr.exprs
+            is Expr.List -> expr.exprs
                     .map { show(it) }
                     .joinToString(prefix = "(", separator = " ", postfix = ")")
             is Expr.Vec -> expr.exprs
@@ -91,71 +116,146 @@ fun show(expr: Expr): String =
 
 class EvalException(msg: String) : RuntimeException(msg)
 
-fun eval(expr: Expr): Expr =
-        when (expr) {
-            is Expr.Nil -> expr
-            is Expr.Bool -> expr
-            is Expr.Num -> expr
-            is Expr.Str -> expr
+class Evaluator {
+    val env: Env = Env()
 
-            is Expr.Sym -> evalSym(expr)
+    fun eval(expr: Expr): Expr =
+            when (expr) {
+                is Expr.Nil -> expr
+                is Expr.Bool -> expr
+                is Expr.Num -> expr
+                is Expr.Str -> expr
 
-            is Expr.Quote -> throw EvalException("Cannot eval Quote")
+                is Expr.Sym -> evalSym(expr)
 
-            is Expr.Unquote -> throw EvalException("Cannot eval Unquote")
+                is Expr.Quote -> throw EvalException("Cannot eval Quote")
 
-            is Expr.QuasiQuote -> throw EvalException("Cannot eval QuasiQuote")
+                is Expr.Unquote -> throw EvalException("Cannot eval Unquote")
 
-            is Expr.SpliceUnquote -> throw EvalException("Cannot eval SpliceUnquote")
+                is Expr.QuasiQuote -> throw EvalException("Cannot eval QuasiQuote")
 
-            is Expr.Deref -> throw EvalException("Cannot eval Deref")
+                is Expr.SpliceUnquote -> throw EvalException("Cannot eval SpliceUnquote")
 
-            is Expr.Metadata -> throw EvalException("Cannot eval Metadata")
+                is Expr.Deref -> throw EvalException("Cannot eval Deref")
 
-            is Expr.SExpr -> evalSExpr(expr)
+                is Expr.Metadata -> throw EvalException("Cannot eval Metadata")
 
-            is Expr.Vec -> Expr.Vec(expr.exprs.map { eval(it) })
+                is Expr.List -> evalSExpr(expr)
 
-            is Expr.HashMap -> Expr.HashMap(expr.exprs.map { eval(it) })
+                is Expr.Vec -> Expr.Vec(expr.exprs.map { eval(it) })
+
+                is Expr.HashMap -> Expr.HashMap(expr.exprs.map { eval(it) })
+            }
+
+    fun evalSym(sym: Expr.Sym): Expr =
+            if (sym.value.startsWith(':'))
+                sym
+            else
+                env.get(sym.value) ?: throw EvalException("Undefined symbol ${sym.value}")
+
+    fun evalSExpr(expr: Expr.List): Expr {
+        if (expr.exprs.isEmpty()) {
+            return expr
         }
 
-fun evalSym(sym: Expr.Sym): Expr =
-        if (sym.value.startsWith(':'))
-            sym
-        else
-            throw EvalException("Undefined symbol ${sym.value}")
+        val func = expr.exprs[0] as? Expr.Sym
+                ?: throw EvalException("First element of list should be a Sym")
 
-fun evalSExpr(expr: Expr.SExpr): Expr {
-    if (expr.exprs.isEmpty()) {
-        return expr
+        val args = expr.exprs.drop(1)
+
+        return when (func.value) {
+            "+" ->
+                Expr.Num(args.fold(0L, { acc, expr -> acc + (eval(expr) as Expr.Num).value }))
+
+            "-" -> {
+                if (args.isEmpty())
+                    throw EvalException("${args.size} args passed to -, expected one or more")
+                val first = eval(args[0]) as Expr.Num
+                val rest = args.drop(1)
+                Expr.Num(rest.fold(
+                        first.value,
+                        { acc, expr -> acc - (eval(expr) as Expr.Num).value }))
+            }
+
+            "*" ->
+                Expr.Num(args.fold(1L, { acc, expr -> acc * (eval(expr) as Expr.Num).value }))
+
+            "/" -> {
+                if (args.size < 2)
+                    throw EvalException("${args.size} args passed to /, expected 2 or more")
+                val first = eval(args[0]) as Expr.Num
+                val rest = args.drop(1)
+                Expr.Num(rest.fold(
+                        first.value,
+                        { acc, expr -> acc / (eval(expr) as Expr.Num).value }))
+            }
+
+            "def!" -> {
+                if (args.size != 2)
+                    throw EvalException("${args.size} args passed to def!, expected 2")
+
+                val name = args[0]
+                val value = args[1]
+
+                if (name !is Expr.Sym)
+                    throw EvalException("First arg to def! must be Sym")
+
+                val result = eval(value)
+                env.set(name.value, result)
+
+                result
+            }
+
+            "let*" -> {
+                if (args.size != 2)
+                    throw EvalException("${args.size} args passes to let*, expected 2")
+                val firstArg = args[0]
+                val bindingsList = when (firstArg) {
+                    is Expr.List -> firstArg.exprs
+                    is Expr.Vec -> firstArg.exprs
+                    else -> throw EvalException("First argument to let* must be list or vec")
+                }
+                if ((bindingsList.size % 2) != 0)
+                    throw EvalException("let* bindings list must have even # of elements")
+
+                val names = bindingsList.filterIndexed({ n, expr -> n % 2 == 0 })
+                val values = bindingsList.filterIndexed({ n, expr -> n % 2 == 1 })
+                val bindings = names.zip(values)
+
+                env.pushScope()
+                bindings.forEach {
+                    val name = it.component1() as? Expr.Sym
+                            ?: throw EvalException("let must bind to a Sym")
+                    val value = it.component2()
+                    env.set(name.value, eval(value))
+                }
+                val result = eval(args[1])
+                env.popScope()
+                result
+            }
+
+            else ->
+                throw EvalException("Undefined symbol ${func.value}")
+        }
     }
+}
 
-    val func = expr.exprs[0] as? Expr.Sym
-            ?: throw EvalException("First element of s-expr should be a Sym")
+fun rep() {
+    val evaluator = Evaluator()
 
-    val args = expr.exprs.drop(1)
+    while (true) {
+        print("user> ")
 
-    return when (func.value) {
-        "+" -> Expr.Num(args.fold(0L, { acc, expr -> acc + (eval(expr) as Expr.Num).value }))
-        "-" -> {
-            if (args.isEmpty())
-                throw EvalException("${args.size} args passed to -")
-            val first = eval(args[0]) as Expr.Num
-            val rest = args.drop(1)
-            Expr.Num(rest.fold(
-                    first.value,
-                    { acc, expr -> acc - (eval(expr) as Expr.Num).value }))
+        val line = readLine() ?: break
+        if (line.isBlank())
+            continue
+
+        try {
+            println(show(evaluator.eval(parse(line))))
+        } catch (e: ParserException) {
+            println("Parse error: ${e.message}")
+        } catch (e: EvalException) {
+            println("Eval error: ${e.message}")
         }
-        "*" -> Expr.Num(args.fold(1L, { acc, expr -> acc * (eval(expr) as Expr.Num).value }))
-        "/" -> {
-            if (args.size < 2)
-                throw EvalException("${args.size} args passed to /")
-            val first = eval(args[0]) as Expr.Num
-            val rest = args.drop(1)
-            Expr.Num(rest.fold(
-                    first.value,
-                    { acc, expr -> acc / (eval(expr) as Expr.Num).value }))
-        }
-        else -> throw EvalException("Undefined symbol ${func.value}")
     }
 }
