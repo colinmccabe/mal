@@ -8,7 +8,7 @@ fun main(args: Array<String>) {
         if (line.isBlank()) continue
 
         try {
-            println(show(parse(line)))
+            println(prStr(parse(line), printReadably = true))
         } catch (e: ParserException) {
             println("Error: ${e.message}")
         }
