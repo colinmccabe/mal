@@ -7,7 +7,8 @@ import org.codehaus.jparsec.pattern.Patterns
 import java.io.File
 import java.util.*
 
-val SPECIAL_FORMS = listOf("def!", "let*", "if", "fn*", "do")
+val SPECIAL_FORMS = listOf("def!", "let*", "if", "fn*", "do", "quote",
+        "quasiquote", "unquote", "splice-unquote")
 
 interface Seq {
     val exprs: List<Expr>
@@ -19,7 +20,7 @@ sealed class Expr {
     data class Num(val value: Long) : Expr()
     data class Str(val value: String) : Expr()
     data class Sym(val value: String) : Expr()
-    data class Atom(var value: Expr) : Expr()
+    data class Atom(var expr: Expr) : Expr()
     data class Quote(val expr: Expr) : Expr()
     data class Unquote(val expr: Expr) : Expr()
     data class QuasiQuote(val expr: Expr) : Expr()
@@ -62,6 +63,19 @@ val parser: Parser<Expr> = {
     val exprPairRef: Parser.Reference<Pair<Expr, Expr>> = Parser.newReference()
     val exprSeqRef: Parser.Reference<MutableList<Expr>> = Parser.newReference()
 
+    val symFollowedByExpr = { sym: String ->
+        Parsers.sequence(Scanners.string(sym), whitespace.many1(), exprRef.lazy())
+    }
+
+    val listContents = Parsers.or(
+            symFollowedByExpr("splice-unquote").map { Expr.SpliceUnquote(it) },
+            symFollowedByExpr("quote").map { Expr.Quote(it) },
+            symFollowedByExpr("unquote").map { Expr.Unquote(it) },
+            symFollowedByExpr("quasiquote").map { Expr.QuasiQuote(it) },
+            symFollowedByExpr("deref").map { Expr.Deref(it) },
+            exprSeqRef.lazy().map { Expr.List(it) }
+    )
+
     val expr = Parsers.or(
             Patterns.regex("-?\\d+").toScanner("number").source().map { Expr.Num(it.toLong()) },
             Scanners.DOUBLE_QUOTE_STRING.map {
@@ -79,8 +93,8 @@ val parser: Parser<Expr> = {
                     .map { (meta, expr) -> Expr.Metadata(expr, meta) },
             Parsers.between(
                     Scanners.isChar('(').next(whitespace.many()),
-                    exprSeqRef.lazy(),
-                    whitespace.many().next(Scanners.isChar(')'))).map { Expr.List(it) },
+                    listContents,
+                    whitespace.many().next(Scanners.isChar(')'))),
             Parsers.between(
                     Scanners.isChar('[').next(whitespace.many()),
                     exprSeqRef.lazy(),
@@ -111,7 +125,7 @@ fun show(expr: Expr): String =
             is Expr.Num -> expr.value.toString()
             is Expr.Str -> '"' + StringEscapeUtils.escapeJava(expr.value) + '"'
             is Expr.Sym -> expr.value
-            is Expr.Atom -> "(atom ${show(expr.value)})"
+            is Expr.Atom -> "(atom ${show(expr.expr)})"
             is Expr.Quote -> "(quote ${show(expr.expr)})"
             is Expr.Unquote -> "(unquote ${show(expr.expr)})"
             is Expr.QuasiQuote -> "(quasiquote ${show(expr.expr)})"
@@ -182,10 +196,10 @@ tailrec fun eval(env: Env, expr: Expr): Expr {
         is Expr.Nil, is Expr.Bool, is Expr.Num, is Expr.Str, is Expr.Atom, is Expr.Fn, is Expr.BuiltInFn ->
             expr
         is Expr.Sym -> evalSym(env, expr)
-        is Expr.Quote -> throw EvalException("Cannot eval Quote")
-        is Expr.Unquote -> throw EvalException("Cannot eval Unquote")
-        is Expr.QuasiQuote -> throw EvalException("Cannot eval QuasiQuote")
-        is Expr.SpliceUnquote -> throw EvalException("Cannot eval SpliceUnquote")
+        is Expr.Quote -> expr.expr
+        is Expr.QuasiQuote -> quasiquote(env, expr.expr)
+        is Expr.Unquote -> throw EvalException("Cannot eval Unquote in non-quasiquote context")
+        is Expr.SpliceUnquote -> throw EvalException("Cannot eval SpliceUnquote in non-quasiquote context")
         is Expr.Deref -> deref(env, listOf(expr.expr))
         is Expr.Metadata -> throw EvalException("Cannot eval Metadata")
         is Expr.Vec -> Expr.Vec(expr.exprs.map { eval(env, it) })
@@ -256,7 +270,6 @@ tailrec fun eval(env: Env, expr: Expr): Expr {
                         else ->
                             throw EvalException("$fn is not a function")
                     }
-
                 }
             }
         }
@@ -341,20 +354,23 @@ fun not(env: Env, args: List<Expr>): Expr.Bool {
     }
 }
 
-fun list(env: Env, args: List<Expr>) =
-        Expr.List(args.map { eval(env, it) })
+fun list(env: Env, args: List<Expr>) = args
+        .map { eval(env, it) }
+        .let { Expr.List(it) }
 
-fun isList(env: Env, args: List<Expr>) =
-        Expr.Bool(args.all { eval(env, it) is Expr.List })
+fun isList(env: Env, args: List<Expr>) = args
+        .all { eval(env, it) is Expr.List }
+        .let { Expr.Bool(it) }
 
-fun empty(env: Env, args: List<Expr>) =
-        Expr.Bool(args.all {
+fun empty(env: Env, args: List<Expr>) = args
+        .all {
             val value = eval(env, it)
             when (value) {
                 is Seq -> value.exprs.isEmpty()
                 else -> throw EvalException("empty? expects List or Vec arguments")
             }
-        })
+        }
+        .let { Expr.Bool(it) }
 
 fun count(env: Env, args: List<Expr>): Expr.Num =
         if (args.size != 1)
@@ -368,21 +384,39 @@ fun count(env: Env, args: List<Expr>): Expr.Num =
             }
         }
 
+fun cons(env: Env, args: List<Expr>): Expr.List {
+    if (args.size != 2)
+        throw EvalException("cons expects an expression and a List or Vec")
+    val x = eval(env, args.first())
+    val xs = eval(env, args[1]) as? Seq
+            ?: throw EvalException("Second argument to cons must be List or Vec")
+    return Expr.List(listOf(x) + xs.exprs)
+}
+
+fun concat(env: Env, args: List<Expr>) = args
+        .map {
+            eval(env, it) as? Seq
+                    ?: throw EvalException("concat expects List or Vec arguments")
+        }
+        .flatMap(Seq::exprs)
+        .let { Expr.List(it) }
+
 fun atom(env: Env, args: List<Expr>): Expr.Atom {
     if (args.size != 1)
         throw EvalException("atom expects one argument")
     return Expr.Atom(eval(env, args.first()))
 }
 
-fun isAtom(env: Env, args: List<Expr>) =
-        Expr.Bool(args.all { eval(env, it) is Expr.Atom })
+fun isAtom(env: Env, args: List<Expr>) = args
+        .all { eval(env, it) is Expr.Atom }
+        .let { Expr.Bool(it) }
 
 fun deref(env: Env, args: List<Expr>): Expr {
     if (args.size != 1)
         throw EvalException("deref expects one Atom argument")
     val atom = eval(env, args.first()) as? Expr.Atom
             ?: throw EvalException("First argument to deref is not an Atom")
-    return atom.value
+    return atom.expr
 }
 
 fun reset(env: Env, args: List<Expr>): Expr {
@@ -391,7 +425,7 @@ fun reset(env: Env, args: List<Expr>): Expr {
     val atom = eval(env, args.first()) as? Expr.Atom
             ?: throw EvalException("First argument to reset! is not an Atom")
     val value = eval(env, args[1])
-    atom.value = value
+    atom.expr = value
     return value
 }
 
@@ -401,7 +435,7 @@ fun swap(env: Env, args: List<Expr>): Expr {
     val atom = eval(env, args.first()) as? Expr.Atom
             ?: throw EvalException("First argument to swap! is not an Atom")
     val fn = eval(env, args[1])
-    val fnArgs = listOf(atom.value) + args.drop(2).map { eval(env, it) }
+    val fnArgs = listOf(atom.expr) + args.drop(2).map { eval(env, it) }
     val newVal = when (fn) {
         is Expr.BuiltInFn ->
             fn.f(env, fnArgs)
@@ -412,7 +446,7 @@ fun swap(env: Env, args: List<Expr>): Expr {
         else ->
             throw EvalException("First argument to swap! is not a function")
     }
-    atom.value = newVal
+    atom.expr = newVal
     return newVal
 }
 
@@ -530,6 +564,27 @@ fun buildArgList(argNames: List<String>,
             argNames.zip(args)
         }
 
+fun quasiquote(env: Env, expr: Expr): Expr = when (expr) {
+    is Expr.Unquote ->
+        eval(env, expr.expr)
+    is Seq ->
+        expr.exprs.flatMap {
+            when (it) {
+                is Expr.Unquote ->
+                    listOf(eval(env, it.expr))
+                is Expr.SpliceUnquote -> {
+                    val list = eval(env, it.expr) as? Expr.List
+                            ?: throw EvalException("quasiquote argument should evaluate to a List")
+                    list.exprs
+                }
+                else ->
+                    listOf(it)
+            }
+        }.let { Expr.List(it) }
+    else ->
+        expr
+}
+
 val initialEnv: Map<String, Expr> = mutableMapOf(
         "+" to ::plus,
         "-" to ::sub,
@@ -545,6 +600,8 @@ val initialEnv: Map<String, Expr> = mutableMapOf(
         "list?" to ::isList,
         "empty?" to ::empty,
         "count" to ::count,
+        "cons" to ::cons,
+        "concat" to ::concat,
         "atom" to ::atom,
         "atom?" to ::isAtom,
         "deref" to ::deref,
