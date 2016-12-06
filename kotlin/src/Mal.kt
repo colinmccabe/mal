@@ -8,9 +8,9 @@ import java.io.File
 import java.util.*
 
 val SPECIAL_FORMS = listOf(
+        "quote", "quasiquote", "unquote", "splice-unquote", "deref",
         "def!", "defmacro!", "let*", "if", "fn*", "do",
-        "quote", "quasiquote", "unquote", "splice-unquote",
-        "macroexpand"
+        "macroexpand", "try*", "catch*", "throw"
 )
 
 interface Seq {
@@ -187,12 +187,14 @@ class Env {
 
     fun set(sym: String, value: Expr) {
         if (sym in SPECIAL_FORMS)
-            throw EvalException("Cannot define $sym since it is a special form")
+            throw MalException("Cannot define $sym since it is a special form")
         bindings[sym] = value
     }
 }
 
-class EvalException(msg: String) : RuntimeException(msg)
+class MalException(val value: Expr) : RuntimeException() {
+    constructor(msg: String) : this(Expr.Str(msg))
+}
 
 @Suppress("NON_TAIL_RECURSIVE_CALL")  // Not all calls to eval() can be in tail pos
 tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
@@ -204,9 +206,9 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
         is Expr.Quote -> expr.expr
         is Expr.QuasiQuote -> quasiquote(env, expr.expr)
         is Expr.Unquote -> eval(env, expr.expr)
-        is Expr.SpliceUnquote -> throw EvalException("Cannot eval SpliceUnquote in non-quasiquote context")
+        is Expr.SpliceUnquote -> throw MalException("Cannot eval SpliceUnquote in non-quasiquote context")
         is Expr.Deref -> deref(env, listOf(expr.expr))
-        is Expr.Metadata -> throw EvalException("Cannot eval Metadata")
+        is Expr.Metadata -> throw MalException("Cannot eval Metadata")
         is Expr.Vec -> Expr.Vec(expr.exprs.map { eval(env, it) })
         is Expr.HashMap -> Expr.HashMap(expr.exprs.map { eval(env, it) })
         is Expr.List -> {
@@ -221,28 +223,28 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
                     evalDef(env, args, isMacro = true)
                 Expr.Sym("let*") -> {
                     if (args.size != 2)
-                        throw EvalException("${args.size} args passed to let*, expected 2")
+                        throw MalException("${args.size} args passed to let*, expected 2")
                     val firstArg = args[0]
                     val bindingsList = when (firstArg) {
                         is Seq -> firstArg.exprs
-                        else -> throw EvalException("First argument to let* must be List or Vec")
+                        else -> throw MalException("First argument to let* must be List or Vec")
                     }
                     if ((bindingsList.size % 2) != 0)
-                        throw EvalException("let* bindings list must have even # of elements")
+                        throw MalException("let* bindings list must have even # of elements")
                     val names = bindingsList.filterIndexed({ n, _ -> n % 2 == 0 })
                     val values = bindingsList.filterIndexed({ n, _ -> n % 2 == 1 })
                     val bindings = names.zip(values)
                     val innerEnv = Env(env)
                     bindings.forEach { (nameExpr, valueExpr) ->
                         val name = nameExpr as? Expr.Sym
-                                ?: throw EvalException("let must bind to a Sym")
+                                ?: throw MalException("let must bind to a Sym")
                         innerEnv.set(name.value, eval(innerEnv, valueExpr))
                     }
                     eval(innerEnv, args[1])
                 }
                 Expr.Sym("if") -> {
                     if (args.size < 2 || args.size > 3)
-                        throw EvalException("${args.size} args passed to if, expected 2 or 3")
+                        throw MalException("${args.size} args passed to if, expected 2 or 3")
                     val condResult = eval(env, args[0])
                     val cond = when (condResult) {
                         is Expr.Nil -> false
@@ -266,9 +268,13 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
                     }
                 }
                 Expr.Sym("macroexpand") -> {
-                    val firstArg = args.singleOrNull() ?: throw EvalException("macroexpand takes 1 argument")
+                    val firstArg = args.singleOrNull() ?: throw MalException("macroexpand takes 1 argument")
                     macroExpand(env, firstArg)
                 }
+                Expr.Sym("try*") ->
+                    tryMal(env, args)
+                Expr.Sym("throw") ->
+                    throwMal(env, args)
                 else -> {
                     val fn = eval(env, first)
                     when (fn) {
@@ -279,7 +285,7 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
                             eval(funcEnv, body)
                         }
                         else ->
-                            throw EvalException("$fn is not a function")
+                            throw MalException("$fn is not a function")
                     }
                 }
             }
@@ -291,7 +297,7 @@ fun evalSym(env: Env, sym: Expr.Sym): Expr =
         if (sym.value.startsWith(':'))
             sym
         else
-            env.get(sym.value) ?: throw EvalException("Undefined symbol ${sym.value}")
+            env.get(sym.value) ?: throw MalException("'${sym.value}' not found")
 
 fun plus(env: Env, args: List<Expr>) =
         numOp(env, "+", { acc, n -> acc + n }, 1, args)
@@ -307,10 +313,10 @@ fun div(env: Env, args: List<Expr>) =
 
 fun numOp(env: Env, op: String, f: (Long, Long) -> Long, minArgs: Int, args: List<Expr>): Expr.Num {
     if (args.size < minArgs)
-        throw EvalException("${args.size} args passed to $op but expected $minArgs or more")
+        throw MalException("${args.size} args passed to $op but expected $minArgs or more")
     val evaledArgs = args.map {
         val evaled = eval(env, it) as? Expr.Num
-                ?: throw EvalException("$op expects Num arguments, got $it")
+                ?: throw MalException("$op expects Num arguments, got $it")
         evaled.value
     }
     val first = evaledArgs[0]
@@ -333,10 +339,10 @@ fun ltEq(env: Env, args: List<Expr>) =
 fun comparison(env: Env, compare: (Long, Long) -> Boolean, args: List<Expr>): Expr.Bool {
     val msg = "Comparison expects 2 or more Num args"
     if (args.size < 2)
-        throw EvalException(msg)
+        throw MalException(msg)
     val nums = args.map {
         val num = eval(env, it) as? Expr.Num
-                ?: throw EvalException(msg)
+                ?: throw MalException(msg)
         num.value
     }
     return nums.drop(1)
@@ -356,7 +362,7 @@ fun eq(env: Env, args: List<Expr>) = when {
 
 fun not(env: Env, args: List<Expr>): Expr.Bool {
     if (args.size != 1)
-        throw EvalException("not takes 1 argument")
+        throw MalException("not takes 1 argument")
     val evaled = eval(env, args.single())
     return when (evaled) {
         is Expr.Nil -> Expr.Bool(true)
@@ -382,32 +388,32 @@ fun empty(env: Env, args: List<Expr>) = args
             when (value) {
                 is Expr.Nil -> true
                 is Seq -> value.exprs.isEmpty()
-                else -> throw EvalException("empty? expects 1 List/Vec/Nil")
+                else -> throw MalException("empty? expects 1 List/Vec/Nil")
             }
         }.let { Expr.Bool(it) }
 
 fun count(env: Env, args: List<Expr>): Expr.Num {
     val msg = "count expects 1 List/Vec/Nil"
     if (args.size != 1)
-        throw EvalException(msg)
+        throw MalException(msg)
     val value = eval(env, args.single())
     return when (value) {
         is Expr.Nil -> Expr.Num(0)
         is Seq -> Expr.Num(value.exprs.size.toLong())
-        else -> throw EvalException(msg)
+        else -> throw MalException(msg)
     }
 }
 
 fun cons(env: Env, args: List<Expr>): Expr.List {
     val msg = "cons expects an expression and a List/Vec/Nil"
     if (args.size != 2)
-        throw EvalException(msg)
+        throw MalException(msg)
     val x = eval(env, args[0])
     val xs = eval(env, args[1])
     return when (xs) {
         is Expr.Nil -> Expr.List(listOf(x))
         is Seq -> Expr.List(listOf(x) + xs.exprs)
-        else -> throw EvalException(msg)
+        else -> throw MalException(msg)
     }
 }
 
@@ -417,50 +423,50 @@ fun concat(env: Env, args: List<Expr>) = args
             when (value) {
                 is Expr.Nil -> emptyList()
                 is Seq -> value.exprs
-                else -> throw EvalException("concat expects List/Vec/Nil arguments")
+                else -> throw MalException("concat expects List/Vec/Nil arguments")
             }
         }.let { Expr.List(it) }
 
 fun nth(env: Env, args: List<Expr>): Expr {
     val err = "nth expects a List/Vec/Nil and a Num"
     if (args.size != 2)
-        throw EvalException(err)
+        throw MalException(err)
     val seq = eval(env, args[0])
-    val n = eval(env, args[1]) as? Expr.Num ?: throw EvalException(err)
+    val n = eval(env, args[1]) as? Expr.Num ?: throw MalException(err)
     return when (seq) {
         is Expr.Nil -> Expr.Nil
         is Seq -> seq.exprs.getOrNull(n.value.toInt()) ?: Expr.Nil
-        else -> throw EvalException(err)
+        else -> throw MalException(err)
     }
 }
 
 fun first(env: Env, args: List<Expr>): Expr {
     val err = "first expects List/Vec/Nil"
     if (args.size != 1)
-        throw EvalException(err)
+        throw MalException(err)
     val arg = eval(env, args[0])
     return when (arg) {
         is Expr.Nil -> Expr.Nil
         is Seq -> arg.exprs.firstOrNull() ?: Expr.Nil
-        else -> throw EvalException(err)
+        else -> throw MalException(err)
     }
 }
 
 fun rest(env: Env, args: List<Expr>): Expr {
     val err = "rest expects a List/Vec/Nil"
     if (args.size != 1)
-        throw EvalException(err)
+        throw MalException(err)
     val arg = eval(env, args[0])
     return when (arg) {
         is Expr.Nil -> Expr.List(listOf())
         is Seq -> Expr.List(arg.exprs.drop(1))
-        else -> throw EvalException(err)
+        else -> throw MalException(err)
     }
 }
 
 fun atom(env: Env, args: List<Expr>): Expr.Atom {
     if (args.size != 1)
-        throw EvalException("atom expects one argument")
+        throw MalException("atom expects one argument")
     return Expr.Atom(eval(env, args.single()))
 }
 
@@ -470,17 +476,17 @@ fun isAtom(env: Env, args: List<Expr>) = args
 
 fun deref(env: Env, args: List<Expr>): Expr {
     if (args.size != 1)
-        throw EvalException("deref expects one Atom argument")
+        throw MalException("deref expects one Atom argument")
     val atom = eval(env, args.single()) as? Expr.Atom
-            ?: throw EvalException("First argument to deref is not an Atom")
+            ?: throw MalException("First argument to deref is not an Atom")
     return atom.expr
 }
 
 fun reset(env: Env, args: List<Expr>): Expr {
     if (args.size != 2)
-        throw EvalException("reset! expects an Atom and a value")
+        throw MalException("reset! expects an Atom and a value")
     val atom = eval(env, args.first()) as? Expr.Atom
-            ?: throw EvalException("First argument to reset! is not an Atom")
+            ?: throw MalException("First argument to reset! is not an Atom")
     val value = eval(env, args[1])
     atom.expr = value
     return value
@@ -488,9 +494,9 @@ fun reset(env: Env, args: List<Expr>): Expr {
 
 fun swap(env: Env, args: List<Expr>): Expr {
     if (args.size < 2)
-        throw EvalException("swap! expects at least an Atom and a Fn")
+        throw MalException("swap! expects at least an Atom and a Fn")
     val atom = eval(env, args.first()) as? Expr.Atom
-            ?: throw EvalException("First argument to swap! is not an Atom")
+            ?: throw MalException("First argument to swap! is not an Atom")
     val fn = eval(env, args[1])
     val fnArgs = listOf(atom.expr) + args.drop(2).map { eval(env, it) }
     val newVal = when (fn) {
@@ -501,7 +507,7 @@ fun swap(env: Env, args: List<Expr>): Expr {
             eval(funcEnv, body)
         }
         else ->
-            throw EvalException("Second argument to swap! is not a function")
+            throw MalException("Second argument to swap! is not a function")
     }
     atom.expr = newVal
     return newVal
@@ -526,25 +532,25 @@ fun printlnMal(env: Env, args: List<Expr>): Expr.Nil {
 fun readStr(env: Env, args: List<Expr>): Expr {
     val msg = "read-string takes one Str argument"
     if (args.size != 1)
-        throw EvalException(msg)
+        throw MalException(msg)
     val str = eval(env, args.single()) as? Expr.Str
-            ?: throw EvalException(msg)
+            ?: throw MalException(msg)
     return parse(str.value)
 }
 
 fun slurp(env: Env, args: List<Expr>): Expr.Str {
     val msg = "slurp takes one Str argument"
     if (args.size != 1)
-        throw EvalException(msg)
+        throw MalException(msg)
     val path = eval(env, args.single()) as? Expr.Str
-            ?: throw EvalException(msg)
+            ?: throw MalException(msg)
     return Expr.Str(File(path.value).readText(Charsets.UTF_8))
 }
 
 fun loadFile(env: Env, args: List<Expr>): Expr {
     val msg = "load-file takes one Str argument"
     if (args.size != 1)
-        throw EvalException(msg)
+        throw MalException(msg)
     val str = "(do ${slurp(env, args).value} )"
     val ast = readStr(env, listOf(Expr.Str(str)))
     return eval(env, ast)
@@ -552,19 +558,19 @@ fun loadFile(env: Env, args: List<Expr>): Expr {
 
 fun evalMal(env: Env, args: List<Expr>): Expr {
     if (args.size != 1)
-        throw EvalException("eval takes one argument")
+        throw MalException("eval takes one argument")
     return eval(env, eval(env, args.single()))
 }
 
 fun evalDef(env: Env, args: List<Expr>, isMacro: Boolean): Expr {
     if (args.size != 2)
-        throw EvalException("${args.size} args passed to def!, expected 2")
+        throw MalException("${args.size} args passed to def!, expected 2")
 
     val name = args[0]
     val value = args[1]
 
     if (name !is Expr.Sym)
-        throw EvalException("First arg to def! must be Sym")
+        throw MalException("First arg to def! must be Sym")
 
     var result = eval(env, value)
 
@@ -581,13 +587,13 @@ fun evalDef(env: Env, args: List<Expr>, isMacro: Boolean): Expr {
 fun evalFn(env: Env, args: List<Expr>): Expr.Fn {
     val msg = "fn* takes a List/Vec of Sym arguments and a body"
     if (args.size != 2)
-        throw EvalException(msg)
+        throw MalException(msg)
     val argList = args[0] as? Seq
-            ?: throw EvalException(msg)
+            ?: throw MalException(msg)
     val argNames = argList.exprs.map {
         when (it) {
             is Expr.Sym -> it.value
-            else -> throw EvalException(msg)
+            else -> throw MalException(msg)
         }
     }
     val isVariadic = argNames.any { it == "&" }
@@ -595,9 +601,9 @@ fun evalFn(env: Env, args: List<Expr>): Expr.Fn {
     val varArgName =
             if (isVariadic) {
                 if (argNames.count { it == "&" } > 1)
-                    throw EvalException("fn*: Only one & allowed in args list.")
+                    throw MalException("fn*: Only one & allowed in args list.")
                 argNames.takeLastWhile { it != "&" }.singleOrNull()
-                        ?: throw EvalException("fn*: One arg, no more, must appear after &")
+                        ?: throw MalException("fn*: One arg, no more, must appear after &")
             } else null
     val body = args[1]
     return Expr.Fn(normalArgNames, varArgName, body, env)  // TODO: Copy env?
@@ -615,14 +621,14 @@ fun buildArgList(argNames: List<String>,
                  args: List<Expr>): List<Pair<String, Expr>> =
         if (varArgName != null) {
             if (args.size < argNames.size)
-                throw EvalException("Expected ${argNames.size} or more args, got ${args.size}")
+                throw MalException("Expected ${argNames.size} or more args, got ${args.size}")
             val argsList = argNames.zip(args).toMutableList()
             val varArgList = args.subList(argNames.size, args.size)
             argsList.add(Pair(varArgName, Expr.List(varArgList)))
             argsList
         } else {
             if (args.size != argNames.size)
-                throw EvalException("Expected ${argNames.size} args, got ${args.size}")
+                throw MalException("Expected ${argNames.size} args, got ${args.size}")
             argNames.zip(args)
         }
 
@@ -636,7 +642,7 @@ fun quasiquote(env: Env, expr: Expr): Expr = when (expr) {
                     listOf(eval(env, it.expr))
                 is Expr.SpliceUnquote -> {
                     val list = eval(env, it.expr) as? Expr.List
-                            ?: throw EvalException("quasiquote argument should evaluate to a List")
+                            ?: throw MalException("quasiquote argument should evaluate to a List")
                     list.exprs
                 }
                 is Expr.List ->
@@ -671,6 +677,30 @@ fun isMacroCall(env: Env, expr: Expr): Pair<Expr.Fn, List<Expr>>? {
         else ->
             null
     }
+}
+
+fun tryMal(env: Env, args: List<Expr>): Expr {
+    if (args.size != 2)
+        throw MalException("try expects an expr and a catch* block")
+    val catch = args[1]
+    if (catch !is Expr.List || catch.exprs.size != 3 || catch.exprs[0] != Expr.Sym("catch*"))
+        throw MalException("malformed catch* block")
+    val exceptionName = catch.exprs[1] as? Expr.Sym
+            ?: throw MalException("malformed catch* block")
+    val catchBody = catch.exprs[2]
+    return try {
+        eval(env, args[0])
+    } catch (e: MalException) {
+        val catchEnv = Env(env)
+        catchEnv.set(exceptionName.value, e.value)
+        eval(catchEnv, catchBody)
+    }
+}
+
+fun throwMal(env: Env, args: List<Expr>): Expr {
+    val exception = args.singleOrNull()
+            ?: throw MalException("throw* expects 1 arg")
+    throw MalException(eval(env, exception))
 }
 
 val initialEnv: Map<String, Expr> = mutableMapOf(
@@ -732,8 +762,8 @@ fun rep() {
             println(show(eval(env, ast)))
         } catch (e: ParserException) {
             println("Parse error: ${e.message}")
-        } catch (e: EvalException) {
-            println("Eval error: ${e.message}")
+        } catch (e: MalException) {
+            println("Exception: ${show(e.value)}")
         }
     }
 }
