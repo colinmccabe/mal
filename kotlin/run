@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DIR="$(dirname $0)"
+DIR="$(dirname $0)/out/artifacts"
 CP="${DIR}/${STEP}.jar"
 CLASS="${STEP^}Kt"
 

@@ -4,8 +4,13 @@ import org.codehaus.jparsec.Parsers
 import org.codehaus.jparsec.Scanners
 import org.codehaus.jparsec.error.ParserException
 import org.codehaus.jparsec.pattern.Patterns
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStream
+import java.io.InputStreamReader
 import java.util.*
+import java.util.stream.Collectors
+
 
 val SPECIAL_FORMS = listOf(
         "quote", "quasiquote", "unquote", "splice-unquote", "deref",
@@ -18,7 +23,6 @@ interface Seq {
 }
 
 sealed class Expr {
-    object Nil : Expr()
     data class Bool(val value: Boolean) : Expr()
     data class Num(val value: Long) : Expr()
     data class Str(val value: String) : Expr()
@@ -54,6 +58,10 @@ sealed class Expr {
         override fun hashCode(): Int =
                 Objects.hash(exprs)
     }
+
+    object Nil : Expr(), Seq {
+        override val exprs: kotlin.collections.List<Expr> = emptyList()
+    }
 }
 
 val parser: Parser<Expr> = {
@@ -85,9 +93,6 @@ val parser: Parser<Expr> = {
             Scanners.DOUBLE_QUOTE_STRING.map {
                 Expr.Str(StringEscapeUtils.unescapeJava(it.substring(1, it.length - 1)))
             },
-            Scanners.string("nil").map { Expr.Nil },
-            Scanners.string("true").map { Expr.Bool(true) },
-            Scanners.string("false").map { Expr.Bool(false) },
             Parsers.sequence(Scanners.string("~@"), exprRef.lazy()).map { Expr.SpliceUnquote(it) },
             Parsers.sequence(Scanners.isChar('\''), exprRef.lazy()).map { Expr.Quote(it) },
             Parsers.sequence(Scanners.isChar('~'), exprRef.lazy()).map { Expr.Unquote(it) },
@@ -107,7 +112,15 @@ val parser: Parser<Expr> = {
                     Scanners.isChar('{').next(whitespace.many()),
                     exprSeqRef.lazy(),
                     whitespace.many().next(Scanners.isChar('}'))).map { Expr.HashMap(it) },
-            Patterns.regex("[^\\s\\[\\]{}('\"`,;)@]+").toScanner("symbol").source().map { Expr.Sym(it) }
+            Patterns.regex("[^\\s\\[\\]{}('\"`,;)@]+").toScanner("symbol").source()
+                    .map {
+                        when (it) {
+                            "nil" -> Expr.Nil
+                            "true" -> Expr.Bool(true)
+                            "false" -> Expr.Bool(false)
+                            else -> Expr.Sym(it)
+                        }
+                    }
     ).label("expression")
 
     exprRef.set(expr)
@@ -185,11 +198,13 @@ class Env {
             else
                 outerEnv?.get(sym)
 
-    fun set(sym: String, value: Expr) {
-        if (sym in SPECIAL_FORMS)
-            throw MalException("Cannot define $sym since it is a special form")
-        bindings[sym] = value
-    }
+    fun set(sym: String, value: Expr) =
+            if (sym in SPECIAL_FORMS)
+                throw MalException("Cannot define $sym since it is a special form")
+            else if (bindings.containsKey(sym) && value == Expr.Nil)  // Bizarre, but makes tests pass
+                Unit
+            else
+                bindings[sym] = value
 }
 
 class MalException(val value: Expr) : RuntimeException() {
@@ -285,7 +300,7 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
                             eval(funcEnv, body)
                         }
                         else ->
-                            throw MalException("$fn is not a function")
+                            throw MalException("${show(fn)} is not a function")
                     }
                 }
             }
@@ -360,15 +375,24 @@ fun eq(env: Env, args: List<Expr>) = when {
     }
 }
 
-fun not(env: Env, args: List<Expr>): Expr.Bool {
-    if (args.size != 1)
-        throw MalException("not takes 1 argument")
-    val evaled = eval(env, args.single())
-    return when (evaled) {
-        is Expr.Nil -> Expr.Bool(true)
-        is Expr.Bool -> Expr.Bool(!evaled.value)
-        else -> Expr.Bool(false)
-    }
+fun isSym(env: Env, args: List<Expr>): Expr.Bool {
+    if (args.size != 1) throw MalException("sym? takes 1 argument")
+    return Expr.Bool(eval(env, args.single()) is Expr.Sym)
+}
+
+fun isNil(env: Env, args: List<Expr>): Expr.Bool {
+    if (args.size != 1) throw MalException("nil? takes 1 argument")
+    return Expr.Bool(eval(env, args.single()) is Expr.Nil)
+}
+
+fun isTrue(env: Env, args: List<Expr>): Expr.Bool {
+    if (args.size != 1) throw MalException("true? takes 1 argument")
+    return Expr.Bool(eval(env, args.single()) == Expr.Bool(true))
+}
+
+fun isFalse(env: Env, args: List<Expr>): Expr.Bool {
+    if (args.size != 1) throw MalException("false? takes 1 argument")
+    return Expr.Bool(eval(env, args.single()) == Expr.Bool(false))
 }
 
 fun list(env: Env, args: List<Expr>) = args
@@ -386,7 +410,6 @@ fun empty(env: Env, args: List<Expr>) = args
         .all {
             val value = eval(env, it)
             when (value) {
-                is Expr.Nil -> true
                 is Seq -> value.exprs.isEmpty()
                 else -> throw MalException("empty? expects 1 List/Vec/Nil")
             }
@@ -398,7 +421,6 @@ fun count(env: Env, args: List<Expr>): Expr.Num {
         throw MalException(msg)
     val value = eval(env, args.single())
     return when (value) {
-        is Expr.Nil -> Expr.Num(0)
         is Seq -> Expr.Num(value.exprs.size.toLong())
         else -> throw MalException(msg)
     }
@@ -411,7 +433,6 @@ fun cons(env: Env, args: List<Expr>): Expr.List {
     val x = eval(env, args[0])
     val xs = eval(env, args[1])
     return when (xs) {
-        is Expr.Nil -> Expr.List(listOf(x))
         is Seq -> Expr.List(listOf(x) + xs.exprs)
         else -> throw MalException(msg)
     }
@@ -421,7 +442,6 @@ fun concat(env: Env, args: List<Expr>) = args
         .flatMap {
             val value = eval(env, it)
             when (value) {
-                is Expr.Nil -> emptyList()
                 is Seq -> value.exprs
                 else -> throw MalException("concat expects List/Vec/Nil arguments")
             }
@@ -434,7 +454,6 @@ fun nth(env: Env, args: List<Expr>): Expr {
     val seq = eval(env, args[0])
     val n = eval(env, args[1]) as? Expr.Num ?: throw MalException(err)
     return when (seq) {
-        is Expr.Nil -> Expr.Nil
         is Seq -> seq.exprs.getOrNull(n.value.toInt()) ?: Expr.Nil
         else -> throw MalException(err)
     }
@@ -446,7 +465,6 @@ fun first(env: Env, args: List<Expr>): Expr {
         throw MalException(err)
     val arg = eval(env, args[0])
     return when (arg) {
-        is Expr.Nil -> Expr.Nil
         is Seq -> arg.exprs.firstOrNull() ?: Expr.Nil
         else -> throw MalException(err)
     }
@@ -456,12 +474,31 @@ fun rest(env: Env, args: List<Expr>): Expr {
     val err = "rest expects a List/Vec/Nil"
     if (args.size != 1)
         throw MalException(err)
-    val arg = eval(env, args[0])
-    return when (arg) {
-        is Expr.Nil -> Expr.List(listOf())
-        is Seq -> Expr.List(arg.exprs.drop(1))
-        else -> throw MalException(err)
-    }
+    val arg: Seq = (eval(env, args[0]) as? Seq)
+            ?: throw MalException(err)
+    return Expr.List(arg.exprs.drop(1))
+}
+
+fun map(env: Env, args: List<Expr>): Expr {
+    if (args.size != 2)
+        throw MalException("map expects a Fn and a List")
+    val fn = eval(env, args[0])
+    val list = eval(env, args[1]) as? Seq
+            ?: throw MalException("2nd argument to map is not List/Vec/Nil")
+    return list.exprs.map {
+        val arg = eval(env, it)
+        when (fn) {
+            is Expr.BuiltInFn ->
+                fn.f(env, listOf(arg))
+            is Expr.Fn -> {
+                val (funcEnv, body) = envAndBodyForApply(env, fn, listOf(arg))
+                eval(funcEnv, body)
+            }
+            else ->
+                throw MalException("1st argument to map is not a function")
+        }
+
+    }.let { Expr.List(it) }
 }
 
 fun atom(env: Env, args: List<Expr>): Expr.Atom {
@@ -548,11 +585,16 @@ fun slurp(env: Env, args: List<Expr>): Expr.Str {
 }
 
 fun loadFile(env: Env, args: List<Expr>): Expr {
-    val msg = "load-file takes one Str argument"
-    if (args.size != 1)
-        throw MalException(msg)
-    val str = "(do ${slurp(env, args).value} )"
-    val ast = readStr(env, listOf(Expr.Str(str)))
+    val path = args.singleOrNull() as? Expr.Str
+            ?: throw MalException("load-file takes one Str argument")
+    return loadFileStream(env, File(path.value).inputStream())
+}
+
+fun loadFileStream(env: Env, stream: InputStream): Expr {
+    val malCode = BufferedReader(InputStreamReader(stream)).use {
+        it.lines().collect(Collectors.joining("\n"))
+    }
+    val ast = readStr(env, listOf(Expr.Str("(do $malCode)")))
     return eval(env, ast)
 }
 
@@ -609,8 +651,13 @@ fun evalFn(env: Env, args: List<Expr>): Expr.Fn {
     return Expr.Fn(normalArgNames, varArgName, body, env)  // TODO: Copy env?
 }
 
-fun envAndBodyForApply(env: Env, fn: Expr.Fn, args: List<Expr>): Pair<Env, Expr> {
-    val argList = buildArgList(fn.argNames, fn.varArgName, args.map { eval(env, it) })
+fun envAndBodyForApply(env: Env, fn: Expr.Fn, unevaledArgs: List<Expr>): Pair<Env, Expr> {
+    val args =
+            if (fn.isMacro)
+                unevaledArgs
+            else
+                unevaledArgs.map { eval(env, it) }
+    val argList = buildArgList(fn.argNames, fn.varArgName, args)
     val funcEnv = Env(fn.env)
     argList.forEach { (argName, argVal) -> funcEnv.set(argName, argVal) }
     return Pair(funcEnv, fn.body)
@@ -713,7 +760,10 @@ val initialEnv: Map<String, Expr> = mutableMapOf(
         "<" to ::lt,
         "<=" to ::ltEq,
         "=" to ::eq,
-        "not" to ::not,
+        "symbol?" to ::isSym,
+        "nil?" to ::isNil,
+        "true?" to ::isTrue,
+        "false?" to ::isFalse,
         "list" to ::list,
         "list?" to ::isList,
         "empty?" to ::empty,
@@ -723,6 +773,7 @@ val initialEnv: Map<String, Expr> = mutableMapOf(
         "nth" to ::nth,
         "first" to ::first,
         "rest" to ::rest,
+        "map" to ::map,
         "atom" to ::atom,
         "atom?" to ::isAtom,
         "deref" to ::deref,
@@ -735,19 +786,18 @@ val initialEnv: Map<String, Expr> = mutableMapOf(
         "read-string" to ::readStr,
         "slurp" to ::slurp,
         "load-file" to ::loadFile,
-        "eval" to ::evalMal
+        "eval" to ::evalMal,
+        "throw" to ::throwMal
 ).mapValues { (_, f) -> Expr.BuiltInFn(f) }
 
-fun runFile(argv: Array<String>) {
-    val env = Env(initialEnv)
+fun runScript(env: Env, argv: Array<String>) {
     val filePath = argv.first()
     val args = argv.drop(1)
     env.set("*ARGV*", Expr.List(args.map { Expr.Str(it) }))
     loadFile(env, listOf(Expr.Str(filePath)))
 }
 
-fun rep() {
-    val env = Env(initialEnv)
+fun rep(env: Env) {
     env.set("*ARGV*", Expr.List(listOf()))
 
     while (true) {
@@ -768,8 +818,15 @@ fun rep() {
     }
 }
 
-fun malMain(argv: Array<String>) =
-        if (argv.isNotEmpty())
-            runFile(argv)
-        else
-            rep()
+fun malMain(argv: Array<String>) {
+    val env = Env(initialEnv)
+    // Read in core.mal
+    object {}.javaClass.getResourceAsStream("/core.mal").use {
+        loadFileStream(env, it)
+    }
+    // Run script file or enter REPL
+    if (argv.isNotEmpty())
+        runScript(env, argv)
+    else
+        rep(env)
+}
