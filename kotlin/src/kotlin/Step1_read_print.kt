@@ -1,4 +1,4 @@
-import org.codehaus.jparsec.error.ParserException
+import org.jparsec.error.ParserException
 
 fun main(args: Array<String>) {
     while (true) {

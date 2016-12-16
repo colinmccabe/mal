@@ -1,9 +1,9 @@
 import org.apache.commons.lang3.StringEscapeUtils
-import org.codehaus.jparsec.Parser
-import org.codehaus.jparsec.Parsers
-import org.codehaus.jparsec.Scanners
-import org.codehaus.jparsec.error.ParserException
-import org.codehaus.jparsec.pattern.Patterns
+import org.jparsec.Parser
+import org.jparsec.Parsers
+import org.jparsec.Scanners
+import org.jparsec.error.ParserException
+import org.jparsec.pattern.Patterns
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStream
@@ -49,6 +49,9 @@ sealed class Expr {
 
         override fun hashCode(): Int =
                 Objects.hash(exprs)
+
+        override fun toString(): String =
+                exprs.joinToString(prefix = "Expr.List(", separator = ", ", postfix = ")")
     }
 
     class Vec(override val exprs: kotlin.collections.List<Expr>) : Expr(), Seq {
@@ -57,6 +60,9 @@ sealed class Expr {
 
         override fun hashCode(): Int =
                 Objects.hash(exprs)
+
+        override fun toString(): String =
+                exprs.joinToString(prefix = "Expr.Vec(", separator = ", ", postfix = ")")
     }
 
     object Nil : Expr(), Seq {
