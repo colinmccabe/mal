@@ -1,3 +1,4 @@
-fun main(args: Array<String>) =
-        malMain(args)
-
+object Step5_tco {
+    @JvmStatic fun main(args: Array<String>) =
+            Mal.main(args)
+}

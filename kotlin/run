@@ -2,6 +2,6 @@
 
 DIR="$(dirname $0)/out/artifacts"
 CP="${DIR}/${STEP}.jar"
-CLASS="${STEP^}Kt"
+CLASS="${STEP^}"
 
 exec java -cp "$CP" "$CLASS" "$@"

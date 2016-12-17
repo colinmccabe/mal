@@ -1,2 +1,4 @@
-fun main(args: Array<String>) =
-        malMain(args)
+object Step8_macros {
+    @JvmStatic fun main(args: Array<String>) =
+            Mal.main(args)
+}
