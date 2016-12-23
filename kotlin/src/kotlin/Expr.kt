@@ -46,6 +46,9 @@ sealed class Expr {
     object Nil : Expr(), Seq {
         override val exprs: kotlin.collections.List<Expr> =
                 emptyList()
+
+        override fun toString() =
+                "Expr.Nil"
     }
 
     fun prStr(printReadably: Boolean = true): String = when (this) {

@@ -107,7 +107,7 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
                         else -> true
                     }
                     when {
-                        cond == true -> eval(env, args[1])
+                        cond -> eval(env, args[1])
                         args.size == 3 -> eval(env, args[2])
                         else -> Expr.Nil
                     }
