@@ -3,9 +3,10 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.util.*
 import java.util.stream.Collectors
 
-val INITIAL_ENV: Map<String, Expr> = mapOf(
+val BUILT_IN_FUNCTIONS: Map<String, Expr> = mapOf(
         "+" to ::plus,
         "-" to ::sub,
         "*" to ::mult,
@@ -22,6 +23,7 @@ val INITIAL_ENV: Map<String, Expr> = mapOf(
         "nil?" to ::isNil,
         "true?" to ::isTrue,
         "false?" to ::isFalse,
+        "string?" to ::isString,
         "list?" to ::isList,
         "vector?" to ::isVector,
         "list" to ::list,
@@ -37,6 +39,8 @@ val INITIAL_ENV: Map<String, Expr> = mapOf(
         "first" to ::first,
         "rest" to ::rest,
         "map" to ::map,
+        "conj" to ::conj,
+        "seq" to ::seq,
         "assoc" to ::assoc,
         "dissoc" to ::dissoc,
         "get" to ::get,
@@ -66,12 +70,21 @@ val INITIAL_ENV: Map<String, Expr> = mapOf(
         "macroexpand" to ::macroExpandMal,
         "try*" to ::tryMal,
         "throw" to ::throwMal,
-        "apply" to ::apply
+        "apply" to ::apply,
+        "readline" to ::readline,
+        "with-meta" to ::withMeta,
+        "meta" to ::meta,
+        "time-ms" to ::timeMs,
+        "gensym" to ::gensym
 ).mapValues { (_, f) -> Expr.BuiltInFn(f) }
+
+val BUILT_IN_VARS = mapOf("*host-language*" to Expr.Str("kotlin"))
+
+val INITIAL_ENV: Map<String, Expr> =
+        BUILT_IN_FUNCTIONS.plus(BUILT_IN_VARS)
 
 val BANNED_SYMBOLS =
         INITIAL_ENV.keys + listOf("let*", "if", "do")
-
 
 class Env {
     private val bindings: MutableMap<String, Expr>
@@ -87,9 +100,9 @@ class Env {
         this.outerEnv = outerEnv
     }
 
-    fun get(sym: String): Expr? =
-            if (bindings.containsKey(sym))
-                bindings[sym]
+    fun get(sym: Expr.Sym): Expr? =
+            if (bindings.containsKey(sym.value))
+                bindings[sym.value]
             else
                 outerEnv?.get(sym)
 
@@ -109,8 +122,8 @@ class MalException(val value: Expr) : RuntimeException() {
 
 
 @Suppress("NON_TAIL_RECURSIVE_CALL")  // Not all calls to eval() can be in tail pos
-tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
-    val expr = macroExpand(env, exprUnexpanded)
+tailrec fun eval(env: Env, exprRaw: Expr): Expr {
+    val expr = macroExpand(env, exprRaw)
     return when (expr) {
         is Expr.Nil,
         is Expr.Bool,
@@ -123,7 +136,6 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
         is Expr.HashMap ->
             expr
         is Expr.Sym -> evalSym(env, expr)
-        is Expr.WithMeta -> throw MalException("WithMeta not implemented")
         is Expr.Vec -> Expr.Vec(expr.exprs.map { eval(env, it) })
         is Expr.List -> {
             if (expr.exprs.isEmpty())
@@ -200,7 +212,7 @@ fun evalSym(env: Env, sym: Expr.Sym): Expr =
         if (sym.value.startsWith(':'))
             Expr.Keyword(sym.value.drop(1))
         else
-            env.get(sym.value) ?: throw MalException("'${sym.value}' not found")
+            env.get(sym) ?: throw MalException("'${sym.value}' not found")
 
 fun symbol(env: Env, args: List<Expr>): Expr.Sym {
     val msg = "symbol expects one Str argument"
@@ -289,6 +301,9 @@ fun isKeyword(env: Env, args: List<Expr>): Expr.Bool =
 
 fun isNil(env: Env, args: List<Expr>): Expr.Bool =
         isType<Expr.Nil>(env, args)
+
+fun isString(env: Env, args: List<Expr>): Expr.Bool =
+        isType<Expr.Str>(env, args)
 
 fun isVector(env: Env, args: List<Expr>): Expr.Bool =
         isType<Expr.Vec>(env, args)
@@ -431,6 +446,43 @@ fun map(env: Env, args: List<Expr>): Expr {
     }.let { Expr.List(it) }
 }
 
+fun conj(env: Env, args: List<Expr>): Expr {
+    val msg = "conj expects at least a List/Vec/Nil"
+    if (args.isEmpty())
+        throw MalException(msg)
+    val collection = eval(env, args[0])
+    val items = args.drop(1).map { eval(env, it) }
+    return when (collection) {
+        is Expr.List ->
+            Expr.List(items.reversed() + collection.exprs)
+        is Expr.Vec ->
+            Expr.Vec(collection.exprs + items)
+        else ->
+            throw MalException(msg)
+    }
+}
+
+fun seq(env: Env, args: List<Expr>): Expr {
+    val msg = "seq expects 1 Str/List/Vec/Nil argument"
+    if (args.size != 1)
+        throw MalException(msg)
+    val arg = eval(env, args.single())
+    return when (arg) {
+        is Expr.Str ->
+            if (arg.value.isEmpty())
+                Expr.Nil
+            else
+                Expr.List(arg.value.toList().map { Expr.Str(it.toString()) })
+        is Expr.Seq ->
+            if (arg.exprs.isEmpty())
+                Expr.Nil
+            else
+                Expr.List(arg.exprs)
+        else ->
+            throw MalException(msg)
+    }
+}
+
 fun hashMap(env: Env, args: List<Expr>): Expr.HashMap {
     if (args.size % 2 != 0)
         throw MalException("HashMap expects an even # of arguments")
@@ -547,7 +599,7 @@ fun swap(env: Env, args: List<Expr>): Expr {
     val atom = eval(env, args.first()) as? Expr.Atom
             ?: throw MalException("First argument to swap! is not an Atom")
     val fn = eval(env, args[1])
-    val fnArgs = listOf(atom.expr) + args.drop(2).map { eval(env, it) }
+    val fnArgs = listOf(atom.expr) + args.drop(2)
     val newVal = when (fn) {
         is Expr.BuiltInFn ->
             fn.f(env, fnArgs)
@@ -627,22 +679,24 @@ fun evalDefOrDefmacro(env: Env, args: List<Expr>, isMacro: Boolean): Expr {
     if (args.size != 2)
         throw MalException("${args.size} args passed to def!, expected 2")
 
-    val name = args[0]
-    val value = args[1]
+    val name = args[0] as? Expr.Sym
+            ?: throw MalException("First arg to def! must be Sym")
+    val value = eval(env, args[1])
 
-    if (name !is Expr.Sym)
-        throw MalException("First arg to def! must be Sym")
-
-    var result = eval(env, value)
-
-    if (result is Expr.Fn) {
-        result = result.copy(isMacro = isMacro)
-        result.env.set(name.value, result)
+    return when (value) {
+        is Expr.Fn -> {
+            val meta = value.meta
+            val fnNoMeta = value.copy(isMacro = isMacro)
+            fnNoMeta.env.set(name.value, fnNoMeta)
+            val fn = fnNoMeta.withMeta(meta)
+            env.set(name.value, fn)
+            fn
+        }
+        else -> {
+            env.set(name.value, value)
+            value
+        }
     }
-
-    env.set(name.value, result)
-
-    return result
 }
 
 fun evalFn(env: Env, args: List<Expr>): Expr.Fn {
@@ -775,7 +829,7 @@ fun isMacroCall(env: Env, expr: Expr): Pair<Expr.Fn, List<Expr>>? {
         return null
     val sym = expr.exprs.first() as? Expr.Sym
             ?: return null
-    val value = env.get(sym.value)
+    val value = env.get(sym)
     return when {
         (value is Expr.Fn) && value.isMacro ->
             Pair(value, expr.exprs.drop(1))
@@ -828,6 +882,46 @@ fun apply(env: Env, args: List<Expr>): Expr {
     }
 }
 
+fun readline(env: Env, args: List<Expr>): Expr {
+    val msg = "apply expects 1 String argument"
+    if (args.size != 1)
+        throw MalException(msg)
+    val arg = eval(env, args.single()) as? Expr.Str
+            ?: throw MalException(msg)
+    print(arg.value)
+    val input = readLine()
+    return if (input != null) Expr.Str(input) else Expr.Nil
+}
+
+fun withMeta(env: Env, args: List<Expr>): Expr {
+    if (args.size != 2)
+        throw MalException("with-meta expects 2 args, an expr and its metadata")
+    val expr = eval(env, args[0])
+    val meta = eval(env, args[1])
+    return expr.withMeta(meta)
+}
+
+fun meta(env: Env, args: List<Expr>): Expr {
+    if (args.size != 1)
+        throw MalException("meta expects 1 argument")
+    val arg = eval(env, args.single())
+    return arg.meta
+}
+
+@Suppress("UNUSED_PARAMETER")
+fun gensym(env: Env, args: List<Expr>): Expr.Sym {
+    if (args.isNotEmpty())
+        throw MalException("gensym expects no args")
+    val uuid = UUID.randomUUID()
+    return Expr.Sym("gensym-$uuid")
+}
+
+@Suppress("UNUSED_PARAMETER")
+fun timeMs(env: Env, args: List<Expr>): Expr.Num {
+    if (args.isNotEmpty())
+        throw MalException("time-ms takes no args")
+    return Expr.Num(System.currentTimeMillis())
+}
 
 fun runScript(env: Env, argv: Array<String>) {
     val filePath = argv.first()
@@ -860,6 +954,7 @@ fun rep(env: Env) {
 object Mal {
     @JvmStatic fun main(argv: Array<String>) {
         val env = Env(INITIAL_ENV)
+        env.set("start-time", Expr.Num(System.currentTimeMillis()))
         // Read in core.mal
         javaClass.getResourceAsStream("/core.mal").use {
             loadFileStream(env, it)

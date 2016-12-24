@@ -41,9 +41,24 @@
           `(let* (~condvar ~(first xs))
             (if ~condvar (and ~@(rest xs)) ~condvar)))))))
 
-(defmacro! or (fn* (& xs) (if (empty? xs) nil (if (= 1 (count xs)) (first xs) `(let* (or_FIXME ~(first xs)) (if or_FIXME or_FIXME (or ~@(rest xs))))))))
+(defmacro! or
+  (fn* (& xs)
+    (if (empty? xs)
+      nil
+      (if (= 1 (count xs))
+        (first xs)
+        (let* (condvar (gensym))
+          `(let* (~condvar ~(first xs))
+             (if ~condvar ~condvar (or ~@(rest xs)))))))))
 
-(defmacro! cond (fn* (& xs) (if (> (count xs) 0) (list 'if (first xs) (if (> (count xs) 1) (nth xs 1) (throw "odd number of forms to cond")) (cons 'cond (rest (rest xs)))))))
+(defmacro! cond
+  (fn* (& clauses)
+    (if (> (count clauses) 0)
+      (list 'if (first clauses)
+            (if (> (count clauses) 1)
+                (nth clauses 1)
+                (throw "cond requires an even number of forms"))
+            (cons 'cond (rest (rest clauses)))))))
 
 (defmacro! ->
   (fn* (x & xs)

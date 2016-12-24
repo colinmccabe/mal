@@ -21,17 +21,19 @@ object Step1_read_print {
      * The parser parses hash maps into lists, e.g. (hash-map ...), but
      * for the tests to pass these need to be evaluated into hash maps.
      */
-    fun fixAst(expr: Expr): Expr = when (expr) {
-        is Expr.List -> {
-            if (!expr.exprs.isEmpty() && expr.exprs[0] == Expr.Sym("hash-map"))
-                hashMap(Env(null as Env?), expr.exprs.drop(1).map { fixAst(it) })
-            else
-                Expr.List(expr.exprs.map { fixAst(it) })
+    fun fixAst(expr: Expr): Expr {
+        if (expr !is Expr.Nil)
+            expr.meta = fixAst(expr.meta)
+        return when (expr) {
+            is Expr.List -> {
+                if (!expr.exprs.isEmpty() && expr.exprs[0] == Expr.Sym("hash-map"))
+                    hashMap(Env(null as Env?), expr.exprs.drop(1).map { fixAst(it) })
+                else
+                    Expr.List(expr.exprs.map { fixAst(it) })
+            }
+            else ->
+                expr
         }
-        is Expr.WithMeta ->
-                Expr.WithMeta(expr.expr, fixAst(expr.meta))
-        else ->
-            expr
     }
 
 }

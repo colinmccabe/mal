@@ -4,7 +4,7 @@ import org.jparsec.Parsers.*
 import org.jparsec.Scanners.*
 import org.jparsec.Terminals
 import org.jparsec.Token
-import org.jparsec.pattern.Patterns
+import org.jparsec.pattern.Patterns.regex
 
 object Parse {
     val whitespace: Parser<Void> = or(
@@ -16,7 +16,7 @@ object Parse {
     val symDisallowedChars =
             "\\s,;\"'`~@\\^\\[\\]{}()"
     val symChar: Parser<Void> =
-            Patterns.regex("[^$symDisallowedChars]").toScanner("symChar")
+            regex("[^$symDisallowedChars]").toScanner("symChar")
 
     val nil: Parser<Expr.Nil> =
             string("nil").notFollowedBy(symChar).map { Expr.Nil }
@@ -27,13 +27,13 @@ object Parse {
 
     val symbol: Parser<Expr.Sym> = Parsers.or(
             // Need several cases to parse things like "-" and "->" but not accidentally parse negative numbers
-            Patterns.regex("[^\\-\\d$symDisallowedChars][^$symDisallowedChars]*").toScanner("symbol"),
-            Patterns.regex("-[^\\d$symDisallowedChars][^$symDisallowedChars]*").toScanner("symbol"),
+            regex("[^\\-\\d$symDisallowedChars][^$symDisallowedChars]*").toScanner("symbol"),
+            regex("-[^\\d$symDisallowedChars][^$symDisallowedChars]*").toScanner("symbol"),
             string("-").notFollowedBy(Terminals.IntegerLiteral.TOKENIZER)
     ).source().map { Expr.Sym(it) }
 
     val number: Parser<Expr.Num> =
-            Patterns.regex("-?\\d+")
+            regex("-?\\d+")
                     .toScanner("number").source()
                     .map { Expr.Num(it.toLong()) }
 
@@ -68,10 +68,12 @@ object Parse {
             sequence(token("~@"), exprLazy).map { Expr.List(listOf(Expr.Sym("splice-unquote")) + it) },
             sequence(token("~"), exprLazy).map { Expr.List(listOf(Expr.Sym("unquote")) + it) },
             sequence(token("@"), exprLazy).map { Expr.List(listOf(Expr.Sym("deref")) + it) },
-            sequence(token("^"), exprLazy, exprLazy, { _, meta, expr -> Expr.WithMeta(expr, meta) }),
+            sequence(token("^"), exprLazy, exprLazy,
+                    { _, meta, expr -> Expr.List(listOf(Expr.Sym("with-meta"), expr, meta)) }),
             between(token("("), exprLazy.many(), token(")")).map { Expr.List(it) },
             between(token("["), exprLazy.many(), token("]")).map { Expr.Vec(it) },
-            between(token("{"), exprLazy.many(), token("}")).map { Expr.List(listOf(Expr.Sym("hash-map")) + it) })
+            between(token("{"), exprLazy.many(), token("}"))
+                    .map { Expr.List(listOf(Expr.Sym("hash-map")) + it) })
 
     val parser: Parser<Expr> by lazy {
         exprRef.set(expr)
