@@ -5,12 +5,72 @@ import java.io.InputStream
 import java.io.InputStreamReader
 import java.util.stream.Collectors
 
+val INITIAL_ENV: Map<String, Expr> = mapOf(
+        "+" to ::plus,
+        "-" to ::sub,
+        "*" to ::mult,
+        "/" to ::div,
+        ">" to ::gt,
+        ">=" to ::gtEq,
+        "<" to ::lt,
+        "<=" to ::ltEq,
+        "=" to ::eq,
+        "symbol" to ::symbol,
+        "keyword" to ::keyword,
+        "symbol?" to ::isSymbol,
+        "keyword?" to ::isKeyword,
+        "nil?" to ::isNil,
+        "true?" to ::isTrue,
+        "false?" to ::isFalse,
+        "list?" to ::isList,
+        "vector?" to ::isVector,
+        "list" to ::list,
+        "vector" to ::vector,
+        "hash-map" to ::hashMap,
+        "map?" to ::isMap,
+        "empty?" to ::empty,
+        "sequential?" to ::isSequential,
+        "count" to ::count,
+        "cons" to ::cons,
+        "concat" to ::concat,
+        "nth" to ::nth,
+        "first" to ::first,
+        "rest" to ::rest,
+        "map" to ::map,
+        "assoc" to ::assoc,
+        "dissoc" to ::dissoc,
+        "get" to ::get,
+        "contains?" to ::contains,
+        "keys" to ::keys,
+        "vals" to ::vals,
+        "atom" to ::atom,
+        "atom?" to ::isAtom,
+        "deref" to ::deref,
+        "reset!" to ::reset,
+        "swap!" to ::swap,
+        "pr-str" to ::prStrMal,
+        "str" to ::str,
+        "prn" to ::prn,
+        "println" to ::printlnMal,
+        "read-string" to ::readStr,
+        "slurp" to ::slurp,
+        "load-file" to ::loadFile,
+        "eval" to ::evalMal,
+        "def!" to ::evalDef,
+        "defmacro!" to ::evalDefmacro,
+        "fn*" to ::evalFn,
+        "quote" to ::quote,
+        "quasiquote" to ::quasiquote,
+        "unquote" to ::unquote,
+        "splice-unquote" to ::spliceUnquote,
+        "macroexpand" to ::macroExpandMal,
+        "try*" to ::tryMal,
+        "throw" to ::throwMal,
+        "apply" to ::apply
+).mapValues { (_, f) -> Expr.BuiltInFn(f) }
 
-val SPECIAL_FORMS = listOf(
-        "quote", "quasiquote", "unquote", "splice-unquote", "deref",
-        "def!", "defmacro!", "let*", "if", "fn*", "do",
-        "macroexpand", "try*", "catch*", "throw"
-)
+val BANNED_SYMBOLS =
+        INITIAL_ENV.keys + listOf("let*", "if", "do")
 
 
 class Env {
@@ -34,17 +94,19 @@ class Env {
                 outerEnv?.get(sym)
 
     fun set(sym: String, value: Expr) =
-            if (sym in SPECIAL_FORMS)
-                throw MalException("Cannot define $sym since it is a special form")
+            if (sym in BANNED_SYMBOLS)
+                throw MalException("Cannot define $sym - there is a built-in with the same name")
             else if (bindings.containsKey(sym) && value == Expr.Nil)  // Bizarre, but makes tests pass
                 Unit
             else
                 bindings[sym] = value
 }
 
+
 class MalException(val value: Expr) : RuntimeException() {
     constructor(msg: String) : this(Expr.Str(msg))
 }
+
 
 @Suppress("NON_TAIL_RECURSIVE_CALL")  // Not all calls to eval() can be in tail pos
 tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
@@ -61,7 +123,7 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
         is Expr.HashMap ->
             expr
         is Expr.Sym -> evalSym(env, expr)
-        is Expr.WithMeta -> throw MalException("Cannot eval WithMeta")
+        is Expr.WithMeta -> throw MalException("WithMeta not implemented")
         is Expr.Vec -> Expr.Vec(expr.exprs.map { eval(env, it) })
         is Expr.List -> {
             if (expr.exprs.isEmpty())
@@ -69,12 +131,6 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
             val first = expr.exprs.first()
             val args = expr.exprs.drop(1)
             when (first) {
-                Expr.Sym("def!") ->
-                    evalDef(env, args, isMacro = false)
-
-                Expr.Sym("defmacro!") ->
-                    evalDef(env, args, isMacro = true)
-
                 Expr.Sym("let*") -> {
                     if (args.size != 2)
                         throw MalException("${args.size} args passed to let*, expected 2")
@@ -113,9 +169,6 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
                     }
                 }
 
-                Expr.Sym("fn*") ->
-                    evalFn(env, args)
-
                 Expr.Sym("do") -> when {
                     args.isEmpty() ->
                         Expr.Nil
@@ -124,35 +177,6 @@ tailrec fun eval(env: Env, exprUnexpanded: Expr): Expr {
                         eval(env, args.last())
                     }
                 }
-
-                Expr.Sym("quote") -> {
-                    if (args.size != 1)
-                        throw MalException("quote expects 1 argument")
-                    return args.single()
-                }
-
-                Expr.Sym("quasiquote") ->
-                    quasiquote(env, args)
-
-                Expr.Sym("unquote") -> {
-                    if (args.size != 1)
-                        throw MalException("unquote expects 1 argument")
-                    eval(env, args.single())
-                }
-
-                Expr.Sym("splice-unquote") ->
-                    throw MalException("Cannot eval SpliceUnquote in non-quasiquote context")
-
-                Expr.Sym("macroexpand") -> {
-                    val firstArg = args.singleOrNull() ?: throw MalException("macroexpand takes 1 argument")
-                    macroExpand(env, firstArg)
-                }
-
-                Expr.Sym("try*") ->
-                    tryMal(env, args)
-
-                Expr.Sym("throw") ->
-                    throwMal(env, args)
 
                 else -> {
                     val fn = eval(env, first)
@@ -589,10 +613,17 @@ fun loadFileStream(env: Env, stream: InputStream): Expr {
 fun evalMal(env: Env, args: List<Expr>): Expr {
     if (args.size != 1)
         throw MalException("eval takes one argument")
-    return eval(env, eval(env, args.single()))
+    val argValue = eval(env, args.single())
+    return eval(env, argValue)
 }
 
-fun evalDef(env: Env, args: List<Expr>, isMacro: Boolean): Expr {
+fun evalDef(env: Env, args: List<Expr>) =
+        evalDefOrDefmacro(env, args, isMacro = false)
+
+fun evalDefmacro(env: Env, args: List<Expr>) =
+        evalDefOrDefmacro(env, args, isMacro = true)
+
+fun evalDefOrDefmacro(env: Env, args: List<Expr>, isMacro: Boolean): Expr {
     if (args.size != 2)
         throw MalException("${args.size} args passed to def!, expected 2")
 
@@ -670,6 +701,23 @@ fun buildArgList(argNames: List<String>,
             argNames.zip(args)
         }
 
+@Suppress("UNUSED_PARAMETER")
+fun quote(env: Env, args: List<Expr>): Expr {
+    if (args.size != 1)
+        throw MalException("quote expects 1 argument")
+    return args.single()
+}
+
+fun unquote(env: Env, args: List<Expr>): Expr {
+    if (args.size != 1)
+        throw MalException("unquote expects 1 argument")
+    return eval(env, args.single())
+}
+
+@Suppress("UNUSED_PARAMETER")
+fun spliceUnquote(env: Env, args: List<Expr>): Expr =
+        throw MalException("Cannot eval splice-unquote outside of a quasiquoted list")
+
 fun quasiquote(env: Env, args: List<Expr>): Expr {
     if (args.size != 1)
         throw MalException("quasiquote expects 1 arg")
@@ -704,6 +752,12 @@ fun quasiquote(env: Env, args: List<Expr>): Expr {
         else ->
             arg
     }
+}
+
+fun macroExpandMal(env: Env, args: List<Expr>): Expr {
+    val firstArg = args.singleOrNull()
+            ?: throw MalException("macroexpand takes 1 argument")
+    return macroExpand(env, firstArg)
 }
 
 fun macroExpand(env: Env, initialAst: Expr): Expr {
@@ -774,60 +828,6 @@ fun apply(env: Env, args: List<Expr>): Expr {
     }
 }
 
-val initialEnv: Map<String, Expr> = mutableMapOf(
-        "+" to ::plus,
-        "-" to ::sub,
-        "*" to ::mult,
-        "/" to ::div,
-        ">" to ::gt,
-        ">=" to ::gtEq,
-        "<" to ::lt,
-        "<=" to ::ltEq,
-        "=" to ::eq,
-        "symbol" to ::symbol,
-        "keyword" to ::keyword,
-        "symbol?" to ::isSymbol,
-        "keyword?" to ::isKeyword,
-        "nil?" to ::isNil,
-        "true?" to ::isTrue,
-        "false?" to ::isFalse,
-        "list?" to ::isList,
-        "vector?" to ::isVector,
-        "list" to ::list,
-        "vector" to ::vector,
-        "hash-map" to ::hashMap,
-        "map?" to ::isMap,
-        "empty?" to ::empty,
-        "sequential?" to ::isSequential,
-        "count" to ::count,
-        "cons" to ::cons,
-        "concat" to ::concat,
-        "nth" to ::nth,
-        "first" to ::first,
-        "rest" to ::rest,
-        "map" to ::map,
-        "assoc" to ::assoc,
-        "dissoc" to ::dissoc,
-        "get" to ::get,
-        "contains?" to ::contains,
-        "keys" to ::keys,
-        "vals" to ::vals,
-        "atom" to ::atom,
-        "atom?" to ::isAtom,
-        "deref" to ::deref,
-        "reset!" to ::reset,
-        "swap!" to ::swap,
-        "pr-str" to ::prStrMal,
-        "str" to ::str,
-        "prn" to ::prn,
-        "println" to ::printlnMal,
-        "read-string" to ::readStr,
-        "slurp" to ::slurp,
-        "load-file" to ::loadFile,
-        "eval" to ::evalMal,
-        "throw" to ::throwMal,
-        "apply" to ::apply
-).mapValues { (_, f) -> Expr.BuiltInFn(f) }
 
 fun runScript(env: Env, argv: Array<String>) {
     val filePath = argv.first()
@@ -859,12 +859,12 @@ fun rep(env: Env) {
 
 object Mal {
     @JvmStatic fun main(argv: Array<String>) {
-        val env = Env(initialEnv)
+        val env = Env(INITIAL_ENV)
         // Read in core.mal
         javaClass.getResourceAsStream("/core.mal").use {
             loadFileStream(env, it)
         }
-        // Run script file or enter REPL
+        // Run script file, or enter REPL
         if (argv.isNotEmpty())
             runScript(env, argv)
         else
