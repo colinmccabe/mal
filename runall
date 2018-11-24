@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+
+import subprocess
+import sys
+
+argv = sys.argv
+arg_len = len(argv)
+
+if arg_len == 1:
+    step_nums = range(0, 0xA)
+elif arg_len == 2:
+    step_nums = range(0, int(argv[1]) + 1)
+elif arg_len == 3:
+    step_nums = range(int(argv[1]), int(argv[2]) + 1)
+else:
+    raise Exception("{} args passed".format(arg_len))
+
+make_args = map(lambda n: "test^kotlin^step{:X}".format(n),
+                step_nums)
+
+cmd = ['make']
+cmd.extend(make_args)
+
+subprocess.run(cmd)
